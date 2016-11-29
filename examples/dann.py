@@ -87,7 +87,7 @@ def batch_gen(batches, id_array, data, labels):
 def evaluate_dann(num_batches, size):
     acc = 0
     for i in range(0, num_batches):
-        _, prob = dann_model.predict_on_batch(XT_test[i * size:i * size + size])
+        _, prob = dann_src_model.predict_on_batch(XT_test[i * size:i * size + size])
         predictions = np.argmax(prob, axis=1)
         actual = np.argmax(y_test[i * size:i * size + size], axis=1)
         acc += float(np.sum((predictions == actual))) / size
@@ -188,22 +188,23 @@ class DANNBuilder(object):
         branch = Dropout(0.1)(branch)
         branch = Dense(2, activation='softmax', name='domain_output')(branch)
 
-        # When building DANN model, route first half of batch (source examples)
-        # to domain classifier, and route full batch (half source, half target)
-        # to the domain classifier.
-        net = Lambda(lambda x: K.switch(K.learning_phase(),
-                     x[:int(batch_size / 2), :], x, lazy=True),
-                     output_shape=lambda x: ((batch_size / 2,) +
-                     x[1:]) if _TRAIN else x[0:])(net)
-
         net = self._build_classifier(net)
-        model = Model(input=main_input, output=[branch, net])
-        if plot_model:
-            plot(model, show_shapes=True)
-        model.compile(loss={'classifier_output': 'categorical_crossentropy',
+        #model for source data
+        model_src = Model(input=main_input, output=[branch, net])
+        #model for target data
+        model_tgt = Model(input=main_input, output=[branch])
+
+        model_src.compile(loss={'classifier_output': 'categorical_crossentropy',
                       'domain_output': 'categorical_crossentropy'},
                       optimizer=self.opt, metrics=['accuracy'])
-        return model
+
+        model_tgt.compile(loss={'domain_output': 'categorical_crossentropy'},
+                      optimizer=self.opt, metrics=['accuracy'])
+
+        if plot_model:
+            plot(model_src, show_shapes=True)
+            plot(model_tgt, show_shapes=True)
+        return (model_src, model_tgt)
 
     def build_tsne_model(self, main_input):
         '''Create model to output intermediate layer
@@ -219,9 +220,10 @@ builder = DANNBuilder()
 src_model = builder.build_source_model(main_input)
 src_vis = builder.build_tsne_model(main_input)
 
-dann_model = builder.build_dann_model(main_input)
+dann_src_model, dann_tgt_model = builder.build_dann_model(main_input)
 dann_vis = builder.build_tsne_model(main_input)
 print('Training source only model')
+
 src_model.fit(X_train, y_train, batch_size=64, nb_epoch=10, verbose=1,
               validation_data=(X_test, y_test))
 print('Evaluating target samples on source-only model')
@@ -270,12 +272,12 @@ for i in range(nb_epoch):
             target_gen = target_gen(target_batches, target_index_arr, XT_train,
                                     None)
 
-        # Concatenate source and target batch
-        xb = np.vstack([xb, xt])
-
-        metrics = dann_model.train_on_batch({'main_input': xb},
+        metrics = dann_src_model.train_on_batch({'main_input': xb},
                                             {'classifier_output': yb,
-                                            'domain_output': domain_labels},
+                                            'domain_output': domain_labels[:batch_size/2]},
+                                            check_batch_dim=False)
+        metrics = dann_tgt_model.train_on_batch({'main_input': xt},
+                                            {'domain_output': domain_labels[batch_size/2:]},
                                             check_batch_dim=False)
         j += 1
 
