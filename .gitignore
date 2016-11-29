@@ -17,3 +17,6 @@ Keras.egg-info
 
 # developer environments
 .idea
+
+#custom
+.spyproject/
