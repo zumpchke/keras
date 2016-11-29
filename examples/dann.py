@@ -213,7 +213,7 @@ class DANNBuilder(object):
                            output=self.domain_invariant_features)
         return tsne_model
 
-dddwww
+ddd
 main_input = Input(shape=(3, img_rows, img_cols), name='main_input')
 
 builder = DANNBuilder()
