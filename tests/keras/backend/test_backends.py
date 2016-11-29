@@ -260,8 +260,8 @@ class TestBackend(object):
         yth = xth ** 2
         ytf = xtf ** 2
 
-        lossth = KTH.reverse_gradient(KTH.sum(yth), lth)
-        losstf = KTF.reverse_gradient(KTF.sum(ytf), ltf)
+        lossth = KTH.ReverseGradient(lth)(KTH.sum(yth))
+        losstf = KTF.ReverseGradient(ltf)(KTF.sum(ytf))
 
         gradth = KTH.gradients(lossth, [xth])
         gradtf = KTF.gradients(losstf, [xtf])

@@ -1696,11 +1696,12 @@ def ctc_batch_cost(y_true, y_pred, input_length, label_length):
 
 class ReverseGradient(theano.Op):
     '''Flips the sign of incoming gradient during training.'''
+    view_map = {0: [0]}
     __props__ = ('hp_lambda', )
 
-    def __init__(self):
+    def __init__(self, hp_lambda):
         super(ReverseGradient, self).__init__()
-        self.hp_lambda = None
+        self.hp_lambda = hp_lambda
 
     def make_node(self, x):
         assert hasattr(self, '_props'), 'Your version of theano is too old to support __props__.'
@@ -1717,8 +1718,3 @@ class ReverseGradient(theano.Op):
 
     def infer_shape(self, node, i0_shapes):
         return i0_shapes
-
-_reverse_gradient = ReverseGradient()
-def reverse_gradient(x, hp_lambda):
-    _reverse_gradient.hp_lambda = hp_lambda
-    return _reverse_gradient(x)
