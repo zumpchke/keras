@@ -1,13 +1,13 @@
-from __future__ import print_function
 from __future__ import absolute_import
+from __future__ import print_function
 
-import warnings
 import copy
-import time
-import numpy as np
 import multiprocessing
 import threading
+import time
+import warnings
 
+import numpy as np
 import six
 
 try:
@@ -983,8 +983,7 @@ class Model(Container):
         sample_weights = [standardize_weights(ref, sw, cw, mode)
                           for (ref, sw, cw, mode)
                           in zip(y, sample_weights, class_weights, self.sample_weight_modes)]
-        if check_batch_dim:
-            check_array_lengths(x, y, sample_weights)
+        check_array_lengths(x, y, sample_weights)
         check_loss_and_target_compatibility(y, self.loss_functions, self.internal_output_shapes)
         if self.stateful and batch_size:
             if x[0].shape[0] % batch_size != 0:
@@ -1193,7 +1192,7 @@ class Model(Container):
                                   batch_size=batch_size, verbose=verbose)
 
     def train_on_batch(self, x, y,
-                       sample_weight=None, class_weight=None, check_batch_dim=True):
+                       sample_weight=None, class_weight=None):
         '''Runs a single gradient update on a single batch of data.
 
         # Arguments
@@ -1227,7 +1226,7 @@ class Model(Container):
         x, y, sample_weights = self._standardize_user_data(x, y,
                                                            sample_weight=sample_weight,
                                                            class_weight=class_weight,
-                                                           check_batch_dim=check_batch_dim)
+                                                           check_batch_dim=True)
         if self.uses_learning_phase and type(K.learning_phase()) is not int:
             ins = x + y + sample_weights + [1.]
         else:

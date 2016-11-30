@@ -1,9 +1,10 @@
 import theano
 from theano import tensor as T
-from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
-from theano.tensor.signal import pool
-from theano.tensor.nnet import conv3d2d
 from theano.printing import Print
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from theano.tensor.nnet import conv3d2d
+from theano.tensor.signal import pool
+
 try:
     import theano.sparse as th_sparse_module
 except ImportError:
@@ -963,15 +964,9 @@ def rnn(step_function, inputs, initial_states,
     return last_output, outputs, states
 
 
-def switch(condition, then_expression, else_expression, lazy=False):
+def switch(condition, then_expression, else_expression):
     '''condition: scalar tensor.
-
-    # Arguments:
-        lazy: Use ifelse op which evaluates arguments in a lazy manner.
     '''
-    if lazy:
-        return theano.ifelse.ifelse(condition, then_expression, else_expression)
-
     return T.switch(condition, then_expression, else_expression)
 
 

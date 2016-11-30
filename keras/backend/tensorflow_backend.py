@@ -1310,7 +1310,7 @@ def _cond(condition, then_lambda, else_lambda):
     return cond_fn(condition, then_lambda, else_lambda)
 
 
-def switch(condition, then_expression, else_expression, lazy=False):
+def switch(condition, then_expression, else_expression):
     '''Switches between two operations depending on a scalar value (int or bool).
     Note that both `then_expression` and `else_expression`
     should be symbolic tensors of the *same shape*.
@@ -1319,7 +1319,6 @@ def switch(condition, then_expression, else_expression, lazy=False):
         condition: scalar tensor.
         then_expression: TensorFlow operation.
         else_expression: TensorFlow operation.
-        lazy: Unused (compatibility with Theano backend)
     '''
     x_shape = copy.copy(then_expression.get_shape())
     x = _cond(tf.cast(condition, 'bool'),

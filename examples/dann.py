@@ -22,24 +22,23 @@ Author: Vanush Vaswani (vanush@gmail.com)
 '''
 
 from __future__ import print_function
-from keras.layers import Input, Dense, Dropout, Flatten, Lambda
-from keras.layers import Convolution2D, MaxPooling2D
-from keras.optimizers import SGD
-from keras.models import Model
-from keras.utils.visualize_util import plot
-from keras.utils import np_utils
-from keras.datasets import mnist
-import keras.backend as K
 
 import numpy as np
 from matplotlib import pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
-
 from sklearn.manifold import TSNE
 
-from keras.layers import GradientReversal
-from keras.engine.training import make_batches
+import keras.backend as K
+from keras.datasets import mnist
 from keras.datasets import mnist_m
+from keras.engine.training import make_batches
+from keras.layers import Convolution2D, MaxPooling2D
+from keras.layers import GradientReversal
+from keras.layers import Input, Dense, Dropout, Flatten
+from keras.models import Model
+from keras.optimizers import SGD
+from keras.utils import np_utils
+from keras.utils.visualize_util import plot
 
 
 # Helper functions
@@ -274,10 +273,10 @@ for i in range(nb_epoch):
         metrics = dann_src_model.train_on_batch({'main_input': xb},
                                             {'classifier_output': yb,
                                             'domain_output': domain_labels[:batch_size/2]},
-                                            check_batch_dim=False)
+                                            )
         metrics = dann_tgt_model.train_on_batch({'main_input': xt},
                                             {'domain_output': domain_labels[batch_size/2:]},
-                                            check_batch_dim=False)
+                                            )
         j += 1
 
 print('Evaluating target samples on DANN model')
