@@ -48,11 +48,27 @@ def test_softplus():
         return np.log(np.ones_like(x) + np.exp(x))
 
     x = K.placeholder(ndim=2)
-    f = K.function([x],  [activations.softplus(x)])
+    f = K.function([x], [activations.softplus(x)])
     test_values = get_standard_values()
 
     result = f([test_values])[0]
     expected = softplus(test_values)
+    assert_allclose(result, expected, rtol=1e-05)
+
+
+def test_softsign():
+    '''
+    Test using a reference softsign implementation
+    '''
+    def softsign(x):
+        return np.divide(x, np.ones_like(x) + np.absolute(x))
+
+    x = K.placeholder(ndim=2)
+    f = K.function([x], [activations.softsign(x)])
+    test_values = get_standard_values()
+
+    result = f([test_values])[0]
+    expected = softsign(test_values)
     assert_allclose(result, expected, rtol=1e-05)
 
 
@@ -69,7 +85,7 @@ def test_sigmoid():
     sigmoid = np.vectorize(ref_sigmoid)
 
     x = K.placeholder(ndim=2)
-    f = K.function([x],  [activations.sigmoid(x)])
+    f = K.function([x], [activations.sigmoid(x)])
     test_values = get_standard_values()
 
     result = f([test_values])[0]
@@ -92,7 +108,7 @@ def test_hard_sigmoid():
     hard_sigmoid = np.vectorize(ref_hard_sigmoid)
 
     x = K.placeholder(ndim=2)
-    f = K.function([x],  [activations.hard_sigmoid(x)])
+    f = K.function([x], [activations.hard_sigmoid(x)])
     test_values = get_standard_values()
 
     result = f([test_values])[0]
@@ -113,6 +129,23 @@ def test_relu():
 
     # because no negatives in test values
     assert_allclose(result, test_values, rtol=1e-05)
+
+
+def test_elu():
+    x = K.placeholder(ndim=2)
+    f = K.function([x], [activations.elu(x, 0.5)])
+
+    test_values = get_standard_values()
+    result = f([test_values])[0]
+
+    # because no negatives in test values
+    assert_allclose(result, test_values, rtol=1e-05)
+
+    negative_values = np.array([[-1, -2]], dtype=K.floatx())
+    result = f([negative_values])[0]
+    true_result = (np.exp(negative_values) - 1) / 2
+
+    assert_allclose(result, true_result)
 
 
 def test_tanh():

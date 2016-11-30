@@ -1,14 +1,17 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
+import csv
+
 import numpy as np
 import time
 import json
 import warnings
 
-from collections import deque
+from collections import deque, OrderedDict, Iterable
 from .utils.generic_utils import Progbar
 from keras import backend as K
+from pkg_resources import parse_version
 
 
 class CallbackList(object):
@@ -60,8 +63,7 @@ class CallbackList(object):
             callback.on_batch_end(batch, logs)
         self._delta_ts_batch_end.append(time.time() - t_before_callbacks)
         delta_t_median = np.median(self._delta_ts_batch_end)
-        if self._delta_t_batch > 0. and delta_t_median > 0.95 * \
-           self._delta_t_batch and delta_t_median > 0.1:
+        if self._delta_t_batch > 0. and (delta_t_median > 0.95 * self._delta_t_batch and delta_t_median > 0.1):
             warnings.warn('Method on_batch_end() is slow compared '
                           'to the batch update (%f). Check your callbacks.'
                           % delta_t_median)
@@ -193,7 +195,7 @@ class ProgbarLogger(Callback):
             if k in logs:
                 self.log_values.append((k, logs[k]))
         if self.verbose:
-            self.progbar.update(self.seen, self.log_values)
+            self.progbar.update(self.seen, self.log_values, force=True)
 
 
 class History(Callback):
@@ -211,9 +213,7 @@ class History(Callback):
     def on_epoch_end(self, epoch, logs={}):
         self.epoch.append(epoch)
         for k, v in logs.items():
-            if k not in self.history:
-                self.history[k] = []
-            self.history[k].append(v)
+            self.history.setdefault(k, []).append(v)
 
 
 class ModelCheckpoint(Callback):
@@ -233,25 +233,29 @@ class ModelCheckpoint(Callback):
         verbose: verbosity mode, 0 or 1.
         save_best_only: if `save_best_only=True`,
             the latest best model according to
-            the validation loss will not be overwritten.
+            the quantity monitored will not be overwritten.
         mode: one of {auto, min, max}.
             If `save_best_only=True`, the decision
             to overwrite the current save file is made
             based on either the maximization or the
-            minization of the monitored. For `val_acc`,
+            minimization of the monitored quantity. For `val_acc`,
             this should be `max`, for `val_loss` this should
             be `min`, etc. In `auto` mode, the direction is
             automatically inferred from the name of the monitored quantity.
+        save_weights_only: if True, then only the model's weights will be
+            saved (`model.save_weights(filepath)`), else the full model
+            is saved (`model.save(filepath)`).
 
     '''
     def __init__(self, filepath, monitor='val_loss', verbose=0,
-                 save_best_only=False, mode='auto'):
-
-        super(Callback, self).__init__()
+                 save_best_only=False, save_weights_only=False,
+                 mode='auto'):
+        super(ModelCheckpoint, self).__init__()
         self.monitor = monitor
         self.verbose = verbose
         self.filepath = filepath
         self.save_best_only = save_best_only
+        self.save_weights_only = save_weights_only
 
         if mode not in ['auto', 'min', 'max']:
             warnings.warn('ModelCheckpoint mode %s is unknown, '
@@ -288,7 +292,10 @@ class ModelCheckpoint(Callback):
                               % (epoch, self.monitor, self.best,
                                  current, filepath))
                     self.best = current
-                    self.model.save_weights(filepath, overwrite=True)
+                    if self.save_weights_only:
+                        self.model.save_weights(filepath, overwrite=True)
+                    else:
+                        self.model.save(filepath, overwrite=True)
                 else:
                     if self.verbose > 0:
                         print('Epoch %05d: %s did not improve' %
@@ -296,7 +303,10 @@ class ModelCheckpoint(Callback):
         else:
             if self.verbose > 0:
                 print('Epoch %05d: saving model to %s' % (epoch, filepath))
-            self.model.save_weights(filepath, overwrite=True)
+            if self.save_weights_only:
+                self.model.save_weights(filepath, overwrite=True)
+            else:
+                self.model.save(filepath, overwrite=True)
 
 
 class EarlyStopping(Callback):
@@ -307,14 +317,16 @@ class EarlyStopping(Callback):
         patience: number of epochs with no improvement
             after which training will be stopped.
         verbose: verbosity mode.
-        mode: one of {auto, min, max}. In 'min' mode,
+        mode: one of {auto, min, max}. In `min` mode,
             training will stop when the quantity
-            monitored has stopped decreasing; in 'max'
+            monitored has stopped decreasing; in `max`
             mode it will stop when the quantity
-            monitored has stopped increasing.
+            monitored has stopped increasing; in `auto`
+            mode, the direction is automatically inferred
+            from the name of the monitored quantity.
     '''
     def __init__(self, monitor='val_loss', patience=0, verbose=0, mode='auto'):
-        super(Callback, self).__init__()
+        super(EarlyStopping, self).__init__()
 
         self.monitor = monitor
         self.patience = patience
@@ -323,22 +335,23 @@ class EarlyStopping(Callback):
 
         if mode not in ['auto', 'min', 'max']:
             warnings.warn('EarlyStopping mode %s is unknown, '
-                          'fallback to auto mode.' % (self.mode), RuntimeWarning)
+                          'fallback to auto mode.' % (self.mode),
+                          RuntimeWarning)
             mode = 'auto'
 
         if mode == 'min':
             self.monitor_op = np.less
-            self.best = np.Inf
         elif mode == 'max':
             self.monitor_op = np.greater
-            self.best = -np.Inf
         else:
             if 'acc' in self.monitor:
                 self.monitor_op = np.greater
-                self.best = -np.Inf
             else:
                 self.monitor_op = np.less
-                self.best = np.Inf
+
+    def on_train_begin(self, logs={}):
+        self.wait = 0       # Allow instances to be re-used
+        self.best = np.Inf if self.monitor_op == np.less else -np.Inf
 
     def on_epoch_end(self, epoch, logs={}):
         current = logs.get(self.monitor)
@@ -365,12 +378,19 @@ class RemoteMonitor(Callback):
     # Arguments
         root: root url to which the events will be sent (at the end
             of every epoch). Events are sent to
-            `root + '/publish/epoch/end/'`. Calls are HTTP POST,
-            with a `data` argument which is a JSON-encoded dictionary
-            of event data.
+            `root + '/publish/epoch/end/'` by default. Calls are
+            HTTP POST, with a `data` argument which is a
+            JSON-encoded dictionary of event data.
     '''
-    def __init__(self, root='http://localhost:9000'):
+
+    def __init__(self,
+                 root='http://localhost:9000',
+                 path='/publish/epoch/end/',
+                 field='data'):
+        super(RemoteMonitor, self).__init__()
         self.root = root
+        self.path = path
+        self.field = field
 
     def on_epoch_end(self, epoch, logs={}):
         import requests
@@ -378,10 +398,9 @@ class RemoteMonitor(Callback):
         send['epoch'] = epoch
         for k, v in logs.items():
             send[k] = v
-
         try:
-            requests.post(self.root + '/publish/epoch/end/',
-                          {'data': json.dumps(send)})
+            requests.post(self.root + self.path,
+                          {self.field: json.dumps(send)})
         except:
             print('Warning: could not reach RemoteMonitor '
                   'root server at ' + str(self.root))
@@ -427,19 +446,25 @@ class TensorBoard(Callback):
 
     # Arguments
         log_dir: the path of the directory where to save the log
-            files to be parsed by tensorboard
+            files to be parsed by Tensorboard
         histogram_freq: frequency (in epochs) at which to compute activation
             histograms for the layers of the model. If set to 0,
             histograms won't be computed.
+        write_graph: whether to visualize the graph in Tensorboard.
+            The log file can become quite large when
+            write_graph is set to True.
     '''
-    def __init__(self, log_dir='./logs', histogram_freq=0):
-        super(Callback, self).__init__()
+
+    def __init__(self, log_dir='./logs', histogram_freq=0, write_graph=True, write_images=False):
+        super(TensorBoard, self).__init__()
         if K._BACKEND != 'tensorflow':
             raise Exception('TensorBoard callback only works '
                             'with the TensorFlow backend.')
         self.log_dir = log_dir
         self.histogram_freq = histogram_freq
         self.merged = None
+        self.write_graph = write_graph
+        self.write_images = write_images
 
     def _set_model(self, model):
         import tensorflow as tf
@@ -447,19 +472,39 @@ class TensorBoard(Callback):
 
         self.model = model
         self.sess = KTF.get_session()
-        if self.histogram_freq and not self.merged:
-            layers = self.model.layers
-            for layer in layers:
-                if hasattr(layer, 'W'):
-                    tf.histogram_summary('{}_W'.format(layer), layer.W)
-                if hasattr(layer, 'b'):
-                    tf.histogram_summary('{}_b'.format(layer), layer.b)
+        if self.histogram_freq and self.merged is None:
+            for layer in self.model.layers:
+
+                for weight in layer.weights:
+                    tf.histogram_summary(weight.name, weight)
+
+                    if self.write_images:
+                        w_img = tf.squeeze(weight)
+
+                        shape = w_img.get_shape()
+                        if len(shape) > 1 and shape[0] > shape[1]:
+                            w_img = tf.transpose(w_img)
+
+                        if len(shape) == 1:
+                            w_img = tf.expand_dims(w_img, 0)
+
+                        w_img = tf.expand_dims(tf.expand_dims(w_img, 0), -1)
+
+                        tf.image_summary(weight.name, w_img)
+
                 if hasattr(layer, 'output'):
-                    tf.histogram_summary('{}_out'.format(layer),
+                    tf.histogram_summary('{}_out'.format(layer.name),
                                          layer.output)
         self.merged = tf.merge_all_summaries()
-        self.writer = tf.train.SummaryWriter(self.log_dir,
-                                             self.sess.graph_def)
+        if self.write_graph:
+            if parse_version(tf.__version__) >= parse_version('0.8.0'):
+                self.writer = tf.train.SummaryWriter(self.log_dir,
+                                                     self.sess.graph)
+            else:
+                self.writer = tf.train.SummaryWriter(self.log_dir,
+                                                     self.sess.graph_def)
+        else:
+            self.writer = tf.train.SummaryWriter(self.log_dir)
 
     def on_epoch_end(self, epoch, logs={}):
         import tensorflow as tf
@@ -468,8 +513,14 @@ class TensorBoard(Callback):
             if epoch % self.histogram_freq == 0:
                 # TODO: implement batched calls to sess.run
                 # (current call will likely go OOM on GPU)
-                feed_dict = dict(zip(self.model.inputs,
-                                     self.model.validation_data))
+                if self.model.uses_learning_phase:
+                    cut_v_data = len(self.model.inputs)
+                    val_data = self.model.validation_data[:cut_v_data] + [0]
+                    tensors = self.model.inputs + [K.learning_phase()]
+                else:
+                    val_data = self.model.validation_data
+                    tensors = self.model.inputs
+                feed_dict = dict(zip(tensors, val_data))
                 result = self.sess.run([self.merged], feed_dict=feed_dict)
                 summary_str = result[0]
                 self.writer.add_summary(summary_str, epoch)
@@ -483,3 +534,217 @@ class TensorBoard(Callback):
             summary_value.tag = name
             self.writer.add_summary(summary, epoch)
         self.writer.flush()
+
+
+class ReduceLROnPlateau(Callback):
+    '''Reduce learning rate when a metric has stopped improving.
+
+    Models often benefit from reducing the learning rate by a factor
+    of 2-10 once learning stagnates. This callback monitors a
+    quantity and if no improvement is seen for a 'patience' number
+    of epochs, the learning rate is reduced.
+
+    # Example
+        ```python
+            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2,
+                                          patience=5, min_lr=0.001)
+            model.fit(X_train, Y_train, callbacks=[reduce_lr])
+        ```
+
+    # Arguments
+        monitor: quantity to be monitored.
+        factor: factor by which the learning rate will
+            be reduced. new_lr = lr * factor
+        patience: number of epochs with no improvement
+            after which learning rate will be reduced.
+        verbose: int. 0: quiet, 1: update messages.
+        mode: one of {auto, min, max}. In `min` mode,
+            lr will be reduced when the quantity
+            monitored has stopped decreasing; in `max`
+            mode it will be reduced when the quantity
+            monitored has stopped increasing; in `auto`
+            mode, the direction is automatically inferred
+            from the name of the monitored quantity.
+        epsilon: threshold for measuring the new optimum,
+            to only focus on significant changes.
+        cooldown: number of epochs to wait before resuming
+            normal operation after lr has been reduced.
+        min_lr: lower bound on the learning rate.
+    '''
+
+    def __init__(self, monitor='val_loss', factor=0.1, patience=10,
+                 verbose=0, mode='auto', epsilon=1e-4, cooldown=0, min_lr=0):
+        super(Callback, self).__init__()
+
+        self.monitor = monitor
+        if factor >= 1.0:
+            raise ValueError('ReduceLROnPlateau does not support a factor >= 1.0.')
+        self.factor = factor
+        self.min_lr = min_lr
+        self.epsilon = epsilon
+        self.patience = patience
+        self.verbose = verbose
+        self.cooldown = cooldown
+        self.cooldown_counter = 0  # Cooldown counter.
+        self.wait = 0
+        self.best = 0
+        self.mode = mode
+        self.monitor_op = None
+        self.reset()
+
+    def reset(self):
+        if self.mode not in ['auto', 'min', 'max']:
+            warnings.warn('Learning Rate Plateau Reducing mode %s is unknown, '
+                          'fallback to auto mode.' % (self.mode), RuntimeWarning)
+            self.mode = 'auto'
+        if self.mode == 'min' or (self.mode == 'auto' and 'acc' not in self.monitor):
+            self.monitor_op = lambda a, b: np.less(a, b - self.epsilon)
+            self.best = np.Inf
+        else:
+            self.monitor_op = lambda a, b: np.greater(a, b + self.epsilon)
+            self.best = -np.Inf
+        self.cooldown_counter = 0
+        self.wait = 0
+        self.lr_epsilon = self.min_lr * 1e-4
+
+    def on_train_begin(self, logs={}):
+        self.reset()
+
+    def on_epoch_end(self, epoch, logs={}):
+        logs['lr'] = K.get_value(self.model.optimizer.lr)
+        current = logs.get(self.monitor)
+        if current is None:
+            warnings.warn('Learning Rate Plateau Reducing requires %s available!' %
+                          self.monitor, RuntimeWarning)
+        else:
+            if self.in_cooldown():
+                self.cooldown_counter -= 1
+                self.wait = 0
+
+            if self.monitor_op(current, self.best):
+                self.best = current
+                self.wait = 0
+            elif not self.in_cooldown():
+                if self.wait >= self.patience:
+                    old_lr = float(K.get_value(self.model.optimizer.lr))
+                    if old_lr > self.min_lr + self.lr_epsilon:
+                        new_lr = old_lr * self.factor
+                        new_lr = max(new_lr, self.min_lr)
+                        K.set_value(self.model.optimizer.lr, new_lr)
+                        if self.verbose > 0:
+                            print('\nEpoch %05d: reducing learning rate to %s.' % (epoch, new_lr))
+                        self.cooldown_counter = self.cooldown
+                        self.wait = 0
+                self.wait += 1
+
+    def in_cooldown(self):
+        return self.cooldown_counter > 0
+
+
+class CSVLogger(Callback):
+    '''Callback that streams epoch results to a csv file.
+    Supports all values that can be represented as a string,
+    including 1D iterables such as np.ndarray.
+
+    # Example
+        ```python
+            csv_logger = CSVLogger('training.log')
+            model.fit(X_train, Y_train, callbacks=[csv_logger])
+        ```
+
+    Arguments
+        filename: filename of the csv file, e.g. 'run/log.csv'.
+        separator: string used to separate elements in the csv file.
+        append: True: append if file exists (useful for continuing
+            training). False: overwrite existing file,
+    '''
+
+    def __init__(self, filename, separator=',', append=False):
+        self.sep = separator
+        self.filename = filename
+        self.append = append
+        self.writer = None
+        self.keys = None
+        super(CSVLogger, self).__init__()
+
+    def on_train_begin(self, logs={}):
+        if self.append:
+            self.csv_file = open(self.filename, 'a')
+        else:
+            self.csv_file = open(self.filename, 'w')
+
+    def on_epoch_end(self, epoch, logs={}):
+        def handle_value(k):
+            is_zero_dim_ndarray = isinstance(k, np.ndarray) and k.ndim == 0
+            if isinstance(k, Iterable) and not is_zero_dim_ndarray:
+                return '"[%s]"' % (', '.join(map(lambda x: str(x), k)))
+            else:
+                return k
+
+        if not self.writer:
+            self.keys = sorted(logs.keys())
+            self.writer = csv.DictWriter(self.csv_file, fieldnames=['epoch'] + self.keys)
+            self.writer.writeheader()
+
+        row_dict = OrderedDict({'epoch': epoch})
+        row_dict.update((key, handle_value(logs[key])) for key in self.keys)
+        self.writer.writerow(row_dict)
+        self.csv_file.flush()
+
+    def on_train_end(self, logs={}):
+        self.csv_file.close()
+
+
+class LambdaCallback(Callback):
+    """Callback for creating simple, custom callbacks on-the-fly.
+
+    This callback is constructed with anonymous functions that will be called
+    at the appropiate time. Note that the callbacks expects positional
+    arguments, as:
+     - `on_epoch_begin` and `on_epoch_end` expect two positional arguments: `epoch`, `logs`
+     - `on_batch_begin` and `on_batch_end` expect two positional arguments: `batch`, `logs`
+     - `on_train_begin` and `on_train_end` expect one positional argument: `logs`
+
+    # Arguments
+        on_epoch_begin: called at the beginning of every epoch.
+        on_epoch_end: called at the end of every epoch.
+        on_batch_begin: called at the beginning of every batch.
+        on_batch_end: called at the end of every batch.
+        on_train_begin: called at the beginning of model training.
+        on_train_end: called at the end of model training.
+
+    # Example
+        ```python
+        # Print the batch number at the beginning of every batch.
+        batch_print_callback = LambdaCallback(on_batch_begin=lambda batch, logs: print(batch))
+
+        # Plot the loss after every epoch.
+        import numpy as np
+        import matplotlib.pyplot as plt
+        plot_loss_callback = LambdaCallback(on_epoch_end=lambda epoch, logs: plt.plot(np.arange(epoch), logs['loss']))
+
+        # Terminate some processes after having finished model training.
+        processes = ...
+        cleanup_callback = LambdaCallback(on_train_end=lambda logs: [p.terminate() for p in processes if p.is_alive()])
+
+        model.fit(..., callbacks=[batch_print_callback, plot_loss_callback, cleanup_callback])
+        ```
+
+    """
+
+    def __init__(self,
+                 on_epoch_begin=None,
+                 on_epoch_end=None,
+                 on_batch_begin=None,
+                 on_batch_end=None,
+                 on_train_begin=None,
+                 on_train_end=None,
+                 **kwargs):
+        super(Callback, self).__init__()
+        self.__dict__.update(kwargs)
+        self.on_epoch_begin = on_epoch_begin if on_epoch_begin else lambda epoch, logs: None
+        self.on_epoch_end = on_epoch_end if on_epoch_end else lambda epoch, logs: None
+        self.on_batch_begin = on_batch_begin if on_batch_begin else lambda batch, logs: None
+        self.on_batch_end = on_batch_end if on_batch_end else lambda batch, logs: None
+        self.on_train_begin = on_train_begin if on_train_begin else lambda logs: None
+        self.on_train_end = on_train_end if on_train_end else lambda logs: None

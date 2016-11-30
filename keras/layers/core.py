@@ -7,14 +7,13 @@ import numpy as np
 import copy
 import inspect
 import types as python_types
-import marshal
-import sys
 import warnings
 
 from .. import backend as K
 from .. import activations, initializations, regularizers, constraints
 from ..engine import InputSpec, Layer, Merge
 from ..regularizers import ActivityRegularizer
+from ..utils.generic_utils import func_dump, func_load
 
 
 class Masking(Layer):
@@ -76,20 +75,120 @@ class Dropout(Layer):
         - [Dropout: A Simple Way to Prevent Neural Networks from Overfitting](http://www.cs.toronto.edu/~rsalakhu/papers/srivastava14a.pdf)
     '''
     def __init__(self, p, **kwargs):
-        self.supports_masking = True
-        self.uses_learning_phase = True
         self.p = p
+        if 0. < self.p < 1.:
+            self.uses_learning_phase = True
+        self.supports_masking = True
         super(Dropout, self).__init__(**kwargs)
+
+    def _get_noise_shape(self, x):
+        return None
 
     def call(self, x, mask=None):
         if 0. < self.p < 1.:
-            x = K.in_train_phase(K.dropout(x, level=self.p), x)
+            noise_shape = self._get_noise_shape(x)
+            x = K.in_train_phase(K.dropout(x, self.p, noise_shape), x)
         return x
 
     def get_config(self):
         config = {'p': self.p}
         base_config = super(Dropout, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
+
+class SpatialDropout2D(Dropout):
+    '''This version performs the same function as Dropout, however it drops
+    entire 2D feature maps instead of individual elements. If adjacent pixels
+    within feature maps are strongly correlated (as is normally the case in
+    early convolution layers) then regular dropout will not regularize the
+    activations and will otherwise just result in an effective learning rate
+    decrease. In this case, SpatialDropout2D will help promote independence
+    between feature maps and should be used instead.
+
+    # Arguments
+        p: float between 0 and 1. Fraction of the input units to drop.
+        dim_ordering: 'th' or 'tf'. In 'th' mode, the channels dimension
+            (the depth) is at index 1, in 'tf' mode is it at index 3.
+            It defaults to the `image_dim_ordering` value found in your
+            Keras config file at `~/.keras/keras.json`.
+            If you never set it, then it will be "tf".
+
+    # Input shape
+        4D tensor with shape:
+        `(samples, channels, rows, cols)` if dim_ordering='th'
+        or 4D tensor with shape:
+        `(samples, rows, cols, channels)` if dim_ordering='tf'.
+
+    # Output shape
+        Same as input
+
+    # References
+        - [Efficient Object Localization Using Convolutional Networks](https://arxiv.org/pdf/1411.4280.pdf)
+    '''
+    def __init__(self, p, dim_ordering='default', **kwargs):
+        if dim_ordering == 'default':
+            dim_ordering = K.image_dim_ordering()
+        assert dim_ordering in {'tf', 'th'}, 'dim_ordering must be in {tf, th}'
+        self.dim_ordering = dim_ordering
+        super(SpatialDropout2D, self).__init__(p, **kwargs)
+
+    def _get_noise_shape(self, x):
+        input_shape = K.shape(x)
+        if self.dim_ordering == 'th':
+            noise_shape = (input_shape[0], input_shape[1], 1, 1)
+        elif self.dim_ordering == 'tf':
+            noise_shape = (input_shape[0], 1, 1, input_shape[3])
+        else:
+            raise Exception('Invalid dim_ordering: ' + self.dim_ordering)
+        return noise_shape
+
+
+class SpatialDropout3D(Dropout):
+    '''This version performs the same function as Dropout, however it drops
+    entire 3D feature maps instead of individual elements. If adjacent voxels
+    within feature maps are strongly correlated (as is normally the case in
+    early convolution layers) then regular dropout will not regularize the
+    activations and will otherwise just result in an effective learning rate
+    decrease. In this case, SpatialDropout3D will help promote independence
+    between feature maps and should be used instead.
+
+    # Arguments
+        p: float between 0 and 1. Fraction of the input units to drop.
+        dim_ordering: 'th' or 'tf'.
+            In 'th' mode, the channels dimension (the depth)
+            is at index 1, in 'tf' mode is it at index 4.
+            It defaults to the `image_dim_ordering` value found in your
+            Keras config file at `~/.keras/keras.json`.
+            If you never set it, then it will be "tf".
+
+    # Input shape
+        5D tensor with shape:
+        `(samples, channels, dim1, dim2, dim3)` if dim_ordering='th'
+        or 5D tensor with shape:
+        `(samples, dim1, dim2, dim3, channels)` if dim_ordering='tf'.
+
+    # Output shape
+        Same as input
+
+    # References
+        - [Efficient Object Localization Using Convolutional Networks](https://arxiv.org/pdf/1411.4280.pdf)
+    '''
+    def __init__(self, p, dim_ordering='default', **kwargs):
+        if dim_ordering == 'default':
+            dim_ordering = K.image_dim_ordering()
+        assert dim_ordering in {'tf', 'th'}, 'dim_ordering must be in {tf, th}'
+        self.dim_ordering = dim_ordering
+        super(SpatialDropout3D, self).__init__(p, **kwargs)
+
+    def _get_noise_shape(self, x):
+        input_shape = K.shape(x)
+        if self.dim_ordering == 'th':
+            noise_shape = (input_shape[0], input_shape[1], 1, 1, 1)
+        elif self.dim_ordering == 'tf':
+            noise_shape = (input_shape[0], 1, 1, 1, input_shape[4])
+        else:
+            raise Exception('Invalid dim_ordering: ' + self.dim_ordering)
+        return noise_shape
 
 
 class Activation(Layer):
@@ -160,7 +259,7 @@ class Reshape(Layer):
         '''Find and replace a single missing dimension in an output shape
         given an input shape.
 
-        A near direct port of the internal numpy function _fix_unknown_dimension
+        A near direct port of the internal Numpy function _fix_unknown_dimension
         in numpy/core/src/multiarray/shape.c
 
         # Arguments
@@ -384,9 +483,16 @@ class Lambda(Layer):
 
     # Arguments
         function: The function to be evaluated.
-            Takes one argument: the output of previous layer
+            Takes input tensor as first argument.
         output_shape: Expected output shape from function.
-            Could be a tuple or a function of the shape of the input
+            Can be a tuple or function.
+            If a tuple, it only specifies the first dimension onward;
+                 sample dimension is assumed either the same as the input:
+                 `output_shape = (input_shape[0], ) + output_shape`
+                 or, the input is `None` and the sample dimension is also `None`:
+                 `output_shape = (None, ) + output_shape`
+            If a function, it specifies the entire shape as a function of the
+            input shape: `output_shape = f(input_shape)`
         arguments: optional dictionary of keyword arguments to be passed
             to the function.
 
@@ -401,6 +507,8 @@ class Lambda(Layer):
     def __init__(self, function, output_shape=None, arguments={}, **kwargs):
         self.function = function
         self.arguments = arguments
+        self.supports_masking = False
+
         if output_shape is None:
             self._output_shape = None
         elif type(output_shape) in {tuple, list}:
@@ -429,7 +537,10 @@ class Lambda(Layer):
             # otherwise, we default to the input shape
             return input_shape
         elif type(self._output_shape) in {tuple, list}:
-            nb_samples = input_shape[0] if input_shape else None
+            if type(input_shape) is list:
+                nb_samples = input_shape[0][0]
+            else:
+                nb_samples = input_shape[0] if input_shape else None
             return (nb_samples,) + tuple(self._output_shape)
         else:
             shape = self._output_shape(input_shape)
@@ -445,23 +556,15 @@ class Lambda(Layer):
         return self.function(x, **arguments)
 
     def get_config(self):
-        py3 = sys.version_info[0] == 3
-
         if isinstance(self.function, python_types.LambdaType):
-            if py3:
-                function = marshal.dumps(self.function.__code__).decode('raw_unicode_escape')
-            else:
-                function = marshal.dumps(self.function.func_code).decode('raw_unicode_escape')
+            function = func_dump(self.function)
             function_type = 'lambda'
         else:
             function = self.function.__name__
             function_type = 'function'
 
         if isinstance(self._output_shape, python_types.LambdaType):
-            if py3:
-                output_shape = marshal.dumps(self._output_shape.__code__)
-            else:
-                output_shape = marshal.dumps(self._output_shape.func_code)
+            output_shape = func_dump(self._output_shape)
             output_shape_type = 'lambda'
         elif callable(self._output_shape):
             output_shape = self._output_shape.__name__
@@ -484,8 +587,7 @@ class Lambda(Layer):
         if function_type == 'function':
             function = globals()[config['function']]
         elif function_type == 'lambda':
-            function = marshal.loads(config['function'].encode('raw_unicode_escape'))
-            function = python_types.FunctionType(function, globals())
+            function = func_load(config['function'], globs=globals())
         else:
             raise Exception('Unknown function type: ' + function_type)
 
@@ -493,8 +595,7 @@ class Lambda(Layer):
         if output_shape_type == 'function':
             output_shape = globals()[config['output_shape']]
         elif output_shape_type == 'lambda':
-            output_shape = marshal.loads(config['output_shape'])
-            output_shape = python_types.FunctionType(output_shape, globals())
+            output_shape = func_load(config['output_shape'], globs=globals())
         else:
             output_shape = config['output_shape']
 
@@ -510,12 +611,14 @@ class Dense(Layer):
 
     ```python
         # as first layer in a sequential model:
-        model = Sequential(Dense(32, input_dim=16))
+        model = Sequential()
+        model.add(Dense(32, input_dim=16))
         # now the model will take as input arrays of shape (*, 16)
         # and output arrays of shape (*, 32)
 
         # this is equivalent to the above:
-        model = Sequential(Dense(32, input_shape=(16,)))
+        model = Sequential()
+        model.add(Dense(32, input_shape=(16,)))
 
         # after the first layer, you don't need to specify
         # the size of the input anymore:
@@ -534,7 +637,7 @@ class Dense(Layer):
             or alternatively, elementwise Theano function.
             If you don't specify anything, no activation is applied
             (ie. "linear" activation: a(x) = x).
-        weights: list of numpy arrays to set as initial weights.
+        weights: list of Numpy arrays to set as initial weights.
             The list should have 2 elements, of shape `(input_dim, output_dim)`
             and (output_dim,) for weights and biases respectively.
         W_regularizer: instance of [WeightRegularizer](../regularizers.md)
@@ -547,6 +650,7 @@ class Dense(Layer):
             (eg. maxnorm, nonneg), applied to the main weights matrix.
         b_constraint: instance of the [constraints](../constraints.md) module,
             applied to the bias.
+        bias: whether to include a bias (i.e. make the layer affine rather than linear).
         input_dim: dimensionality of the input (integer).
             This argument (or alternatively, the keyword argument `input_shape`)
             is required when using this layer as the first layer in a model.
@@ -559,7 +663,8 @@ class Dense(Layer):
     '''
     def __init__(self, output_dim, init='glorot_uniform', activation='linear', weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
-                 W_constraint=None, b_constraint=None, input_dim=None, **kwargs):
+                 W_constraint=None, b_constraint=None,
+                 bias=True, input_dim=None, **kwargs):
         self.init = initializations.get(init)
         self.activation = activations.get(activation)
         self.output_dim = output_dim
@@ -572,6 +677,7 @@ class Dense(Layer):
         self.W_constraint = constraints.get(W_constraint)
         self.b_constraint = constraints.get(b_constraint)
 
+        self.bias = bias
         self.initial_weights = weights
         self.input_spec = [InputSpec(ndim=2)]
 
@@ -587,16 +693,19 @@ class Dense(Layer):
 
         self.W = self.init((input_dim, self.output_dim),
                            name='{}_W'.format(self.name))
-        self.b = K.zeros((self.output_dim,),
-                         name='{}_b'.format(self.name))
-        self.trainable_weights = [self.W, self.b]
+        if self.bias:
+            self.b = K.zeros((self.output_dim,),
+                             name='{}_b'.format(self.name))
+            self.trainable_weights = [self.W, self.b]
+        else:
+            self.trainable_weights = [self.W]
 
         self.regularizers = []
         if self.W_regularizer:
             self.W_regularizer.set_param(self.W)
             self.regularizers.append(self.W_regularizer)
 
-        if self.b_regularizer:
+        if self.bias and self.b_regularizer:
             self.b_regularizer.set_param(self.b)
             self.regularizers.append(self.b_regularizer)
 
@@ -607,7 +716,7 @@ class Dense(Layer):
         self.constraints = {}
         if self.W_constraint:
             self.constraints[self.W] = self.W_constraint
-        if self.b_constraint:
+        if self.bias and self.b_constraint:
             self.constraints[self.b] = self.b_constraint
 
         if self.initial_weights is not None:
@@ -615,7 +724,10 @@ class Dense(Layer):
             del self.initial_weights
 
     def call(self, x, mask=None):
-        return self.activation(K.dot(x, self.W) + self.b)
+        output = K.dot(x, self.W)
+        if self.bias:
+            output += self.b
+        return self.activation(output)
 
     def get_output_shape_for(self, input_shape):
         assert input_shape and len(input_shape) == 2
@@ -630,6 +742,7 @@ class Dense(Layer):
                   'activity_regularizer': self.activity_regularizer.get_config() if self.activity_regularizer else None,
                   'W_constraint': self.W_constraint.get_config() if self.W_constraint else None,
                   'b_constraint': self.b_constraint.get_config() if self.b_constraint else None,
+                  'bias': self.bias,
                   'input_dim': self.input_dim}
         base_config = super(Dense, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
@@ -656,10 +769,10 @@ class ActivityRegularization(Layer):
         self.l1 = l1
         self.l2 = l2
 
+        super(ActivityRegularization, self).__init__(**kwargs)
         activity_regularizer = ActivityRegularizer(l1=l1, l2=l2)
         activity_regularizer.set_layer(self)
         self.regularizers = [activity_regularizer]
-        super(ActivityRegularization, self).__init__(**kwargs)
 
     def get_config(self):
         config = {'l1': self.l1,
@@ -689,12 +802,7 @@ class MaxoutDense(Layer):
             or alternatively, Theano function to use for weights
             initialization. This parameter is only relevant
             if you don't pass a `weights` argument.
-        activation: name of activation function to use
-            (see [activations](../activations.md)),
-            or alternatively, elementwise Theano function.
-            If you don't specify anything, no activation is applied
-            (ie. "linear" activation: a(x) = x).
-        weights: list of numpy arrays to set as initial weights.
+        weights: list of Numpy arrays to set as initial weights.
             The list should have 2 elements, of shape `(input_dim, output_dim)`
             and (output_dim,) for weights and biases respectively.
         W_regularizer: instance of [WeightRegularizer](../regularizers.md)
@@ -707,6 +815,7 @@ class MaxoutDense(Layer):
             (eg. maxnorm, nonneg), applied to the main weights matrix.
         b_constraint: instance of the [constraints](../constraints.md) module,
             applied to the bias.
+        bias: whether to include a bias (i.e. make the layer affine rather than linear).
         input_dim: dimensionality of the input (integer).
             This argument (or alternatively, the keyword argument `input_shape`)
             is required when using this layer as the first layer in a model.
@@ -723,7 +832,8 @@ class MaxoutDense(Layer):
     def __init__(self, output_dim, nb_feature=4,
                  init='glorot_uniform', weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
-                 W_constraint=None, b_constraint=None, input_dim=None, **kwargs):
+                 W_constraint=None, b_constraint=None,
+                 bias=True, input_dim=None, **kwargs):
         self.output_dim = output_dim
         self.nb_feature = nb_feature
         self.init = initializations.get(init)
@@ -735,6 +845,7 @@ class MaxoutDense(Layer):
         self.W_constraint = constraints.get(W_constraint)
         self.b_constraint = constraints.get(b_constraint)
 
+        self.bias = bias
         self.initial_weights = weights
         self.input_spec = [InputSpec(ndim=2)]
 
@@ -750,17 +861,19 @@ class MaxoutDense(Layer):
 
         self.W = self.init((self.nb_feature, input_dim, self.output_dim),
                            name='{}_W'.format(self.name))
-        self.b = K.zeros((self.nb_feature, self.output_dim),
-                         name='{}_b'.format(self.name))
+        if self.bias:
+            self.b = K.zeros((self.nb_feature, self.output_dim),
+                             name='{}_b'.format(self.name))
+            self.trainable_weights = [self.W, self.b]
+        else:
+            self.trainable_weights = [self.W]
 
-        self.trainable_weights = [self.W, self.b]
         self.regularizers = []
-
         if self.W_regularizer:
             self.W_regularizer.set_param(self.W)
             self.regularizers.append(self.W_regularizer)
 
-        if self.b_regularizer:
+        if self.bias and self.b_regularizer:
             self.b_regularizer.set_param(self.b)
             self.regularizers.append(self.b_regularizer)
 
@@ -771,7 +884,7 @@ class MaxoutDense(Layer):
         self.constraints = {}
         if self.W_constraint:
             self.constraints[self.W] = self.W_constraint
-        if self.b_constraint:
+        if self.bias and self.b_constraint:
             self.constraints[self.b] = self.b_constraint
 
         if self.initial_weights is not None:
@@ -784,7 +897,10 @@ class MaxoutDense(Layer):
 
     def call(self, x, mask=None):
         # no activation, this layer is only linear.
-        output = K.max(K.dot(x, self.W) + self.b, axis=1)
+        output = K.dot(x, self.W)
+        if self.bias:
+            output += self.b
+        output = K.max(output, axis=1)
         return output
 
     def get_config(self):
@@ -796,6 +912,7 @@ class MaxoutDense(Layer):
                   'activity_regularizer': self.activity_regularizer.get_config() if self.activity_regularizer else None,
                   'W_constraint': self.W_constraint.get_config() if self.W_constraint else None,
                   'b_constraint': self.b_constraint.get_config() if self.b_constraint else None,
+                  'bias': self.bias,
                   'input_dim': self.input_dim}
         base_config = super(MaxoutDense, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
@@ -817,7 +934,7 @@ class Highway(Layer):
             or alternatively, elementwise Theano function.
             If you don't specify anything, no activation is applied
             (ie. "linear" activation: a(x) = x).
-        weights: list of numpy arrays to set as initial weights.
+        weights: list of Numpy arrays to set as initial weights.
             The list should have 2 elements, of shape `(input_dim, output_dim)`
             and (output_dim,) for weights and biases respectively.
         W_regularizer: instance of [WeightRegularizer](../regularizers.md)
@@ -830,6 +947,7 @@ class Highway(Layer):
             (eg. maxnorm, nonneg), applied to the main weights matrix.
         b_constraint: instance of the [constraints](../constraints.md) module,
             applied to the bias.
+        bias: whether to include a bias (i.e. make the layer affine rather than linear).
         input_dim: dimensionality of the input (integer).
             This argument (or alternatively, the keyword argument `input_shape`)
             is required when using this layer as the first layer in a model.
@@ -846,7 +964,8 @@ class Highway(Layer):
     def __init__(self, init='glorot_uniform', transform_bias=-2,
                  activation='linear', weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
-                 W_constraint=None, b_constraint=None, input_dim=None, **kwargs):
+                 W_constraint=None, b_constraint=None,
+                 bias=True, input_dim=None, **kwargs):
         self.init = initializations.get(init)
         self.transform_bias = transform_bias
         self.activation = activations.get(activation)
@@ -858,6 +977,7 @@ class Highway(Layer):
         self.W_constraint = constraints.get(W_constraint)
         self.b_constraint = constraints.get(b_constraint)
 
+        self.bias = bias
         self.initial_weights = weights
         self.input_spec = [InputSpec(ndim=2)]
 
@@ -876,19 +996,21 @@ class Highway(Layer):
         self.W_carry = self.init((input_dim, input_dim),
                                  name='{}_W_carry'.format(self.name))
 
-        self.b = K.zeros((input_dim,), name='{}_b'.format(self.name))
-        # initialize with a vector of values `transform_bias`
-        self.b_carry = K.variable(np.ones((input_dim,)) * self.transform_bias,
-                                  name='{}_b_carry'.format(self.name))
-
-        self.trainable_weights = [self.W, self.b, self.W_carry, self.b_carry]
+        if self.bias:
+            self.b = K.zeros((input_dim,), name='{}_b'.format(self.name))
+            # initialize with a vector of values `transform_bias`
+            self.b_carry = K.variable(np.ones((input_dim,)) * self.transform_bias,
+                                      name='{}_b_carry'.format(self.name))
+            self.trainable_weights = [self.W, self.b, self.W_carry, self.b_carry]
+        else:
+            self.trainable_weights = [self.W, self.W_carry]
 
         self.regularizers = []
         if self.W_regularizer:
             self.W_regularizer.set_param(self.W)
             self.regularizers.append(self.W_regularizer)
 
-        if self.b_regularizer:
+        if self.bias and self.b_regularizer:
             self.b_regularizer.set_param(self.b)
             self.regularizers.append(self.b_regularizer)
 
@@ -899,7 +1021,7 @@ class Highway(Layer):
         self.constraints = {}
         if self.W_constraint:
             self.constraints[self.W] = self.W_constraint
-        if self.b_constraint:
+        if self.bias and self.b_constraint:
             self.constraints[self.b] = self.b_constraint
 
         if self.initial_weights is not None:
@@ -907,8 +1029,14 @@ class Highway(Layer):
             del self.initial_weights
 
     def call(self, x, mask=None):
-        transform_weight = activations.sigmoid(K.dot(x, self.W_carry) + self.b_carry)
-        act = self.activation(K.dot(x, self.W) + self.b)
+        y = K.dot(x, self.W_carry)
+        if self.bias:
+            y += self.b_carry
+        transform_weight = activations.sigmoid(y)
+        y = K.dot(x, self.W)
+        if self.bias:
+            y += self.b
+        act = self.activation(y)
         act *= transform_weight
         output = act + (1 - transform_weight) * x
         return output
@@ -922,6 +1050,7 @@ class Highway(Layer):
                   'activity_regularizer': self.activity_regularizer.get_config() if self.activity_regularizer else None,
                   'W_constraint': self.W_constraint.get_config() if self.W_constraint else None,
                   'b_constraint': self.b_constraint.get_config() if self.b_constraint else None,
+                  'bias': self.bias,
                   'input_dim': self.input_dim}
         base_config = super(Highway, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
@@ -938,8 +1067,10 @@ class TimeDistributedDense(Layer):
 
     # Input shape
         3D tensor with shape `(nb_sample, time_dimension, input_dim)`.
+
     # Output shape
         3D tensor with shape `(nb_sample, time_dimension, output_dim)`.
+
     # Arguments
         output_dim: int > 0.
         init: name of initialization function for the weights of the layer
@@ -952,7 +1083,7 @@ class TimeDistributedDense(Layer):
             or alternatively, elementwise Theano function.
             If you don't specify anything, no activation is applied
             (ie. "linear" activation: a(x) = x).
-        weights: list of numpy arrays to set as initial weights.
+        weights: list of Numpy arrays to set as initial weights.
             The list should have 2 elements, of shape `(input_dim, output_dim)`
             and (output_dim,) for weights and biases respectively.
         W_regularizer: instance of [WeightRegularizer](../regularizers.md)
@@ -965,16 +1096,19 @@ class TimeDistributedDense(Layer):
             (eg. maxnorm, nonneg), applied to the main weights matrix.
         b_constraint: instance of the [constraints](../constraints.md) module,
             applied to the bias.
+        bias: whether to include a bias (i.e. make the layer affine rather than linear).
         input_dim: dimensionality of the input (integer).
             This argument (or alternatively, the keyword argument `input_shape`)
             is required when using this layer as the first layer in a model.
+        input_length: length of inputs sequences
+            (integer, or None for variable-length sequences).
     '''
 
     def __init__(self, output_dim,
                  init='glorot_uniform', activation='linear', weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None,
-                 input_dim=None, input_length=None, **kwargs):
+                 bias=True, input_dim=None, input_length=None, **kwargs):
         warnings.warn('TimeDistributedDense is deprecated, '
                       'please use TimeDistributed(Dense(...)) instead.')
         self.output_dim = output_dim
@@ -988,6 +1122,7 @@ class TimeDistributedDense(Layer):
         self.W_constraint = constraints.get(W_constraint)
         self.b_constraint = constraints.get(b_constraint)
 
+        self.bias = bias
         self.initial_weights = weights
         self.input_spec = [InputSpec(ndim=3)]
         self.supports_masking = True
@@ -1005,17 +1140,17 @@ class TimeDistributedDense(Layer):
 
         self.W = self.init((input_dim, self.output_dim),
                            name='{}_W'.format(self.name))
-        self.b = K.zeros((self.output_dim,),
-                         name='{}_b'.format(self.name))
-
-        self.trainable_weights = [self.W, self.b]
+        if self.bias:
+            self.b = K.zeros((self.output_dim,),
+                             name='{}_b'.format(self.name))
+            self.trainable_weights = [self.W, self.b]
         self.regularizers = []
 
         if self.W_regularizer:
             self.W_regularizer.set_param(self.W)
             self.regularizers.append(self.W_regularizer)
 
-        if self.b_regularizer:
+        if self.bias and self.b_regularizer:
             self.b_regularizer.set_param(self.b)
             self.regularizers.append(self.b_regularizer)
 
@@ -1026,7 +1161,7 @@ class TimeDistributedDense(Layer):
         self.constraints = {}
         if self.W_constraint:
             self.constraints[self.W] = self.W_constraint
-        if self.b_constraint:
+        if self.bias and self.b_constraint:
             self.constraints[self.b] = self.b_constraint
 
         if self.initial_weights is not None:
@@ -1056,7 +1191,9 @@ class TimeDistributedDense(Layer):
 
         # Squash samples and timesteps into a single axis
         x = K.reshape(x, (-1, input_shape[-1]))  # (samples * timesteps, input_dim)
-        y = K.dot(x, self.W) + self.b  # (samples * timesteps, output_dim)
+        y = K.dot(x, self.W)  # (samples * timesteps, output_dim)
+        if self.bias:
+            y += self.b
         # We have to reshape Y to (samples, timesteps, output_dim)
         y = K.reshape(y, (-1, input_length, self.output_dim))  # (samples, timesteps, output_dim)
         y = self.activation(y)
@@ -1071,7 +1208,36 @@ class TimeDistributedDense(Layer):
                   'activity_regularizer': self.activity_regularizer.get_config() if self.activity_regularizer else None,
                   'W_constraint': self.W_constraint.get_config() if self.W_constraint else None,
                   'b_constraint': self.b_constraint.get_config() if self.b_constraint else None,
+                  'bias': self.bias,
                   'input_dim': self.input_dim,
                   'input_length': self.input_length}
         base_config = super(TimeDistributedDense, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+
+class GradientReversal(Layer):
+    '''
+    Flip the sign of gradient during training.
+
+    # Arguments:
+        hp_lambda: Scalar to multiply the flipped gradient.
+    '''
+    def __init__(self, hp_lambda, **kwargs):
+        super(GradientReversal, self).__init__(**kwargs)
+        self.hp_lambda = K.variable(hp_lambda)
+        self.supports_masking = False
+        self.op = K.ReverseGradient(self.hp_lambda)
+
+    def build(self, input_shape):
+        self.trainable_weights = []
+
+    def call(self, x, mask=None):
+        return self.op(x)
+
+    def get_output_shape_for(self, input_shape):
+        return input_shape
+
+    def get_config(self):
+        config = {'hp_lambda': self.hp_lambda}
+        base_config = super(GradientReversal, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))

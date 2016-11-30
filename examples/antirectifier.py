@@ -2,7 +2,7 @@
 
 We build a custom activation layer called 'Antirectifier',
 which modifies the shape of the tensor that passes through it.
-We need to specify two methods: `output_shape` and `get_output`.
+We need to specify two methods: `get_output_shape_for` and `call`.
 
 Note that the same result can also be achieved via a Lambda layer.
 
@@ -12,7 +12,7 @@ backend (`K`), our code can run both on TensorFlow and Theano.
 
 from __future__ import print_function
 from keras.models import Sequential
-from keras.layers.core import Dense, Dropout, Layer, Activation
+from keras.layers import Dense, Dropout, Layer, Activation
 from keras.datasets import mnist
 from keras import backend as K
 from keras.utils import np_utils
