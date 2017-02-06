@@ -23,8 +23,10 @@ Author: Vanush Vaswani (vanush@gmail.com)
 
 from __future__ import print_function
 
-import os, sys
+import argparse
+import os
 import pickle
+import sys
 
 import mpl_toolkits.axisartist as AA
 import numpy as np
@@ -45,7 +47,40 @@ from keras.optimizers import Adam
 from keras.utils import np_utils
 from keras.utils.visualize_util import plot
 
+if K.backend() == "tensorflow":
+    def set_tf_session(gpu_fraction=0.3):
+        '''Assume that you have 6GB of GPU memory and want to allocate ~2GB'''
 
+        num_threads = os.environ.get('OMP_NUM_THREADS')
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=gpu_fraction)
+
+        if num_threads:
+            print("THREADS====================")
+            session = tf.Session(config=tf.ConfigProto(
+                gpu_options=gpu_options, intra_op_parallelism_threads=num_threads,
+                allow_soft_placement=True, log_device_placement=False))
+        else:
+            print("NO THREADAS ===============")
+            session = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options,
+                                                       allow_soft_placement=True, log_device_placement=False))
+
+        K.set_session(session)
+
+    import tensorflow as tf
+
+parser = argparse.ArgumentParser(description="args parser")
+parser.add_argument("run_name", help="")
+parser.add_argument("gpu_fraction", type=float, help="")
+
+args = parser.parse_args()
+run_name = args.run_name
+if not os.path.exists(run_name):
+    os.makedirs(run_name)
+gpu_fraction = args.gpu_fraction
+
+if K.backend() == "tensorflow":
+    print("gpu fraction ", args.gpu_fraction)
+    set_tf_session(gpu_fraction=gpu_fraction)
 
 if sys.argv[1] :
     run_name = sys.argv[1] 
@@ -368,7 +403,8 @@ def loadTrResult():
 
 def pltOut(path):
     if save_plt_figure :
-        plt.save_fig(path) 
+        print("save plt fig :", path)
+        plt.savefig(path)
     else :
         plt.show()
 
@@ -502,9 +538,9 @@ cls_loss_history =[m[2] for m in metric_src_epoch_list]
 plt.plot(list(range(len(domain_loss_history))), domain_loss_history,"r-", list(range(len(cls_loss_history))), cls_loss_history,"b-")
 #plt.savefig(name)
 plt.close()
-import json
-with open('dan_gen.txt', 'w') as outfile:
-    json.dump(metric_src_epoch_list, outfile)
+
+#pickle.dump(metric_src_epoch_list, os.path.join(run_name, "src_metric.pkl"))
+
 
 #%%
 print('Evaluating target samples on DANN model')
