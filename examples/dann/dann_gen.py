@@ -23,7 +23,7 @@ Author: Vanush Vaswani (vanush@gmail.com)
 
 from __future__ import print_function
 
-import os
+import os, sys
 import pickle
 
 import mpl_toolkits.axisartist as AA
@@ -46,6 +46,11 @@ from keras.utils import np_utils
 from keras.utils.visualize_util import plot
 
 
+
+if sys.argv[1] :
+    run_name = sys.argv[1] 
+else :
+    print("no run_name arugment")
 save_plt_figure = True
 
 
@@ -105,7 +110,8 @@ def evaluate_dann(num_batches, size):
 
 batch_size = 128
 #nb_epoch = 15
-nb_epoch = 100
+#nb_epoch = 100
+nb_epoch = 2
 nb_classes = 10
 img_rows, img_cols = 28, 28
 nb_filters = 32
@@ -403,7 +409,8 @@ for label in legend.get_texts():
 
 for label in legend.get_lines():
     label.set_linewidth(1.5)  # the legend line width
-plt.show()
+pltOut(os.path.join(run_name,"acc_loss.png"))
+#plt.show()
 
 
 #%%
@@ -432,8 +439,8 @@ for label in legend.get_texts():
 
 for label in legend.get_lines():
     label.set_linewidth(1.5)  # the legend line width
-plt.show()
-
+#plt.show()
+pltOut(os.path.join(run_name,"acc_grad.png"))
 
 
 
@@ -481,7 +488,9 @@ plt.rcParams["figure.figsize"] = (7,3)
 host.legend(loc='upper left', shadow=True, bbox_to_anchor=(0.0,-0.1))
 
 plt.draw()
-plt.show()
+#plt.show()
+pltOut(os.path.join(run_name,"acc_grad_gradr.png"))
+
 
 
 
@@ -523,4 +532,5 @@ tsne = dann_tsne.fit_transform(dann_embedding)
 plot_embedding(tsne, combined_test_labels.argmax(1),
                combined_test_domain.argmax(1), 'DANN')
 
-plt.show()
+#plt.show()
+pltOut(os.path.join(run_name,"tsne.png"))
