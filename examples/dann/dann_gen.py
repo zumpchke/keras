@@ -43,7 +43,7 @@ from keras.layers import Convolution2D, MaxPooling2D
 from keras.layers import GradientReversal
 from keras.layers import Input, Dense, Dropout, Flatten
 from keras.models import Model
-from keras.optimizers import Adam
+from keras.optimizers import Adam, SGD
 from keras.utils import np_utils
 from keras.utils.visualize_util import plot
 
@@ -144,9 +144,7 @@ def evaluate_dann(num_batches, size):
 # Model parameters
 
 batch_size = 128
-#nb_epoch = 15
-#nb_epoch = 100
-nb_epoch = 2
+nb_epoch = 200
 nb_classes = 10
 img_rows, img_cols = 28, 28
 nb_filters = 32
@@ -197,8 +195,8 @@ class DANNBuilder(object):
         self.net = None
         self.domain_invariant_features = None
         self.grl = None
-        #self.opt = SGD()
-        self.opt = Adam()
+        self.opt = SGD()
+        #self.opt = Adam()
 
     def _build_feature_extractor(self, model_input):
         '''Build segment of net for feature extraction.'''
