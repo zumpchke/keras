@@ -144,7 +144,8 @@ def evaluate_dann(num_batches, size):
 # Model parameters
 
 batch_size = 128
-nb_epoch = 200
+#nb_epoch = 200
+nb_epoch = 50
 nb_classes = 10
 img_rows, img_cols = 28, 28
 nb_filters = 32
@@ -328,7 +329,7 @@ for i in range(nb_epoch):
         lr = 0.01 / (1. + 10 * p)**0.75
         #builder.grl.l = l
         #builder.opt.lr = lr
-        K.set_value(builder.opt.lr, lr)
+        K.set_value(builder.opt.lr, 0.01)
 
         if xb.shape[0] != batch_size / 2:
             continue
