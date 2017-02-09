@@ -1310,7 +1310,7 @@ def _cond(condition, then_lambda, else_lambda):
     return cond_fn(condition, then_lambda, else_lambda)
 
 
-def switch(condition, then_expression, else_expression, lazy=False):
+def switch(condition, then_expression, else_expression):
     '''Switches between two operations depending on a scalar value (int or bool).
     Note that both `then_expression` and `else_expression`
     should be symbolic tensors of the *same shape*.
@@ -1319,7 +1319,6 @@ def switch(condition, then_expression, else_expression, lazy=False):
         condition: scalar tensor.
         then_expression: TensorFlow operation.
         else_expression: TensorFlow operation.
-        lazy: Unused (compatibility with Theano backend)
     '''
     x_shape = copy.copy(then_expression.get_shape())
     x = _cond(tf.cast(condition, 'bool'),
@@ -1927,21 +1926,23 @@ def ctc_decode(y_pred, input_length, greedy=True, beam_width=100,
     return (decoded_dense, log_prob)
 
 
-def reverse_gradient(X, hp_lambda):
-    '''Flips the sign of the incoming gradient during training.'''
-    try:
-        reverse_gradient.num_calls += 1
-    except AttributeError:
-        reverse_gradient.num_calls = 1
+class ReverseGradient(object):
+    num_calls = 0
+    '''Flips the sign of incoming gradient during training.'''
+    def __init__(self, hp_lambda):
 
-    grad_name = "GradientReversal%d" % reverse_gradient.num_calls
+        self.hp_lambda = hp_lambda
 
-    @tf.python.framework.ops.RegisterGradient(grad_name)
-    def _flip_gradients(op, grad):
-        return [tf.neg(grad) * hp_lambda]
+    def __call__(self, x):
+        grad_name = "GradientReversal%d" % ReverseGradient.num_calls
 
-    g = get_session().graph
-    with g.gradient_override_map({'Identity': grad_name}):
-        y = tf.identity(X)
+        @tf.RegisterGradient(grad_name)
+        def _flip_gradients(op, grad):
+            return [tf.neg(grad) * self.hp_lambda]
 
-    return y
+        g = get_session().graph
+        with g.gradient_override_map({'Identity': grad_name}):
+            y = tf.identity(x)
+
+        ReverseGradient.num_calls += 1
+        return y

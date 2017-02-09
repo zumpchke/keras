@@ -23,9 +23,14 @@ Author: Vanush Vaswani (vanush@gmail.com)
 
 from __future__ import print_function
 
+import os
+import pickle
+
+import mpl_toolkits.axisartist as AA
 import numpy as np
 from matplotlib import pyplot as plt
 from mpl_toolkits.axes_grid1 import ImageGrid
+from mpl_toolkits.axes_grid1 import host_subplot
 from sklearn.manifold import TSNE
 
 import keras.backend as K
@@ -36,7 +41,7 @@ from keras.layers import Convolution2D, MaxPooling2D
 from keras.layers import GradientReversal
 from keras.layers import Input, Dense, Dropout, Flatten
 from keras.models import Model
-from keras.optimizers import SGD
+from keras.optimizers import Adam
 from keras.utils import np_utils
 from keras.utils.visualize_util import plot
 
@@ -96,7 +101,8 @@ def evaluate_dann(num_batches, size):
 # Model parameters
 
 batch_size = 128
-nb_epoch = 15
+#nb_epoch = 15
+nb_epoch = 100
 nb_classes = 10
 img_rows, img_cols = 28, 28
 nb_filters = 32
@@ -112,8 +118,8 @@ y_test = np_utils.to_categorical(y_test, nb_classes)
 
 # Prep target data
 mnistm = mnist_m.load_data()
-XT_test = np.swapaxes(np.swapaxes(mnistm['test'], 1, 3), 2, 3)
-XT_train = np.swapaxes(np.swapaxes(mnistm['train'], 1, 3), 2, 3)
+XT_test = np.swapaxes(np.swapaxes(mnistm[b'test'], 1, 3), 2, 3)
+XT_train = np.swapaxes(np.swapaxes(mnistm[b'train'], 1, 3), 2, 3)
 
 X_train = X_train.reshape(X_train.shape[0], 1, img_rows, img_cols)
 X_test = X_test.reshape(X_test.shape[0], 1, img_rows, img_cols)
@@ -147,7 +153,8 @@ class DANNBuilder(object):
         self.net = None
         self.domain_invariant_features = None
         self.grl = None
-        self.opt = SGD()
+        #self.opt = SGD()
+        self.opt = Adam()
 
     def _build_feature_extractor(self, model_input):
         '''Build segment of net for feature extraction.'''
@@ -158,12 +165,12 @@ class DANNBuilder(object):
                             activation='relu')(net)
         net = MaxPooling2D(pool_size=(nb_pool, nb_pool))(net)
         net = Dropout(0.5)(net)
-        net = Flatten()(net)
+        net = Flatten(name="feature_1")(net)
         self.domain_invariant_features = net
         return net
 
     def _build_classifier(self, model_input):
-        net = Dense(128, activation='relu')(model_input)
+        net = Dense(128, activation='relu', name="cls_dense_1")(model_input)
         net = Dropout(0.5)(net)
         net = Dense(nb_classes, activation='softmax',
                     name='classifier_output')(net)
@@ -183,7 +190,7 @@ class DANNBuilder(object):
         net = self._build_feature_extractor(main_input)
         self.grl = GradientReversal(1.0)
         branch = self.grl(net)
-        branch = Dense(128, activation='relu')(branch)
+        branch = Dense(128, activation='relu', name="source_dense_1")(branch)
         branch = Dropout(0.1)(branch)
         branch = Dense(2, activation='softmax', name='domain_output')(branch)
 
@@ -221,11 +228,14 @@ src_vis = builder.build_tsne_model(main_input)
 
 dann_src_model, dann_tgt_model = builder.build_dann_model(main_input)
 dann_vis = builder.build_tsne_model(main_input)
+final_gr = K.gradients(dann_src_model.output, main_input)
+
+
 print('Training source only model')
-src_model.fit(X_train, y_train, batch_size=64, nb_epoch=10, verbose=1,
-              validation_data=(X_test, y_test))
+# src_model.fit(X_train, y_train, batch_size=64, nb_epoch=10, verbose=2,
+#               validation_data=(X_test, y_test))
 print('Evaluating target samples on source-only model')
-print('Accuracy: ', src_model.evaluate(XT_test, y_test)[1])
+print('Accuracy: ', src_model.evaluate(XT_test, y_test,verbose=2)[1])
 
 # Broken out training loop for a DANN model.
 src_index_arr = np.arange(X_train.shape[0])
@@ -237,10 +247,25 @@ j = 0
 
 print('Training DANN model')
 
-for i in range(nb_epoch):
+print("src model metric names ", dann_src_model.metrics_names)
+print("tgt model metric names ", dann_tgt_model.metrics_names)
 
-    batches = make_batches(X_train.shape[0], batch_size / 2)
-    target_batches = make_batches(XT_train.shape[0], batch_size / 2)
+metric_src_epoch_list = []
+metric_tgt_epoch_list = []
+
+gf_names = ["cls_dense_1", "classifier_output", "source_dense_1", "domain_output"]
+gf_list = [K.function([main_input, K.learning_phase()],
+                      K.gradients(dann_src_model.get_layer(layer_name).get_output_at(0), [dann_src_model.get_layer("feature_1").get_output_at(0)]))
+           for layer_name in gf_names]
+
+tr_grad_log = []           
+tr_mtr_log = []
+
+for i in range(nb_epoch):
+    gf_epoch_results = [[] for _ in range(len(gf_list))]
+
+    batches = make_batches(X_train.shape[0], batch_size // 2)
+    target_batches = make_batches(XT_train.shape[0], batch_size // 2)
 
     src_gen = batch_gen(batches, src_index_arr, X_train, y_train)
     target_gen = batch_gen(target_batches, target_index_arr, XT_train, None)
@@ -248,9 +273,11 @@ for i in range(nb_epoch):
     losses = list()
     acc = list()
 
-    print('Epoch ', i)
+    print('## Epoch ', i)
 
-    for (xb, yb) in src_gen:
+    metric_src_batch_list = []
+    metric_tgt_batch_list = []
+    for idx, (xb, yb) in enumerate(src_gen):
 
         # Update learning rate and gradient multiplier as described in
         # the paper.
@@ -264,25 +291,207 @@ for i in range(nb_epoch):
             continue
 
         try:
-            xt = target_gen.next()
+            xt = next(target_gen)
         except:
             # Regeneration
             target_gen = target_gen(target_batches, target_index_arr, XT_train,
                                     None)
 
-        metrics = dann_src_model.train_on_batch({'main_input': xb},
+
+        metric_src = dann_src_model.train_on_batch({'main_input': xb},
                                             {'classifier_output': yb,
-                                            'domain_output': domain_labels[:batch_size/2]},
-                                            )
-        metrics = dann_tgt_model.train_on_batch({'main_input': xt},
-                                            {'domain_output': domain_labels[batch_size/2:]},
+                                            'domain_output': domain_labels[:batch_size//2]},
                                             )
 
+        #np.ones(batch_size)
+        #np.concatenate(np.ones(batch_size//2), np.zeros(batch_size//2))
+
+        metric_src_batch_list.append(metric_src)
+
+        metric_tgt = dann_tgt_model.train_on_batch({'main_input': xt},
+                                            {'domain_output': domain_labels[batch_size//2:]},
+                                            )
+        metric_tgt_batch_list.append(metric_tgt)
         j += 1
 
+        for gf_idx, f in enumerate(gf_list):
+            con_x = np.concatenate((xb,xt), axis=0)
+            grad = f([con_x,1])[0] # 1 for training mode
+            gf_epoch_results[gf_idx].append(grad)
+
+    
+    gf_ep_raw_results = []
+    gf_ep_pr_results = []
+    for gfr_idx, gf_result in enumerate(gf_epoch_results):
+        gf_ep = np.mean(gf_result, axis=0)
+        gf_ep_raw_results.append(gf_ep)
+        gf_sum = np.sum(gf_ep)
+        gf_ss = np.sum(np.square(gf_ep))
+        gf_ep_pr_results.append([gf_sum, gf_ss])
+        
+    
+    gf_metric_result = list(zip(gf_names, gf_ep_pr_results))
+    print(gf_metric_result)
+    tr_grad_log.append(list(zip(gf_names, gf_ep_raw_results)))
+    tr_mtr_log.append(gf_metric_result)
+
+    metric_src_mean = np.mean(np.asarray(metric_src_batch_list), axis=0)
+    metric_tgt_mean = np.mean(np.asarray(metric_tgt_batch_list), axis=0)
+
+    metric_src_epoch_list.append(metric_src_mean)
+    metric_tgt_epoch_list.append(metric_tgt_mean)
+    print("tgt_metric", metric_tgt_mean,"\nsrc_metric", metric_src_mean)
+
+
+#%%
+result_path = "D:/data/result/dann_gen"
+gf_metric_path = os.path.join(result_path, "gf_metric_results.pkl")
+tr_grad_path = os.path.join(result_path, "tr_grad_log.pkl")
+
+def saveTrResult():
+    pickle.dump(gf_metric_result, open(gf_metric_path, "wb"))
+    pickle.dump(tr_grad_log, open(tr_grad_path, "wb"))
+
+    
+def loadTrResult():
+    pickle.load(open(gf_metric_path, "rb"))    
+    pickle.load(open(tr_grad_path, "rb"))    
+
+# if needs more metric
+# tr_grad_log
+#%%
+
+d_acc_hist = [m[3] for m in metric_src_epoch_list]
+d_loss_hist = [m[1] for m in metric_src_epoch_list]
+l_acc_hist = [m[4] for m in metric_src_epoch_list]
+l_loss_hist = [m[2] for m in metric_src_epoch_list]
+d_out_grad_hist = [m[3][1][1] for m in tr_mtr_log]
+l_out_grad_hist = [m[1][1][1] for m in tr_mtr_log]
+    
+#%%
+# plot graph loss, acc
+epr = list(range(len(metric_src_epoch_list)))  # epoch range
+fig, ax = plt.subplots()
+ax2 = ax.twinx()
+
+ax.plot(epr, d_acc_hist, 'r-', label="d-acc") # d acc
+ax2.plot(epr, d_loss_hist, 'r--', label="d-loss") # d loss
+ax.plot(epr, l_acc_hist, 'b-', label="l-acc") # l acc
+ax2.plot(epr, l_loss_hist, 'b--', label="l-loss") # l loss
+
+ax.set_ylim([0.0, 1.0])
+
+plt.title("acc, loss")
+legend = ax.legend(loc='upper left', shadow=True, bbox_to_anchor=(1.1,1))
+legend = ax2.legend(loc='upper left', shadow=True, bbox_to_anchor=(1.1,0.7))
+
+frame = legend.get_frame()
+frame.set_facecolor('0.99')
+
+# Set the fontsize
+for label in legend.get_texts():
+    label.set_fontsize('large')
+
+for label in legend.get_lines():
+    label.set_linewidth(1.5)  # the legend line width
+plt.show()
+
+
+#%%
+# plot graph loss, acc
+epr = list(range(len(metric_src_epoch_list)))  # epoch range
+fig, ax = plt.subplots()
+ax2 = ax.twinx()
+
+ax.plot(epr, d_acc_hist, 'r-', label="d-acc") # d acc
+ax2.plot(epr, d_out_grad_hist, 'r--', label="d-grad") # domain_out_grad
+ax.plot(epr, l_acc_hist, 'b-', label="l-acc") # l acc
+ax2.plot(epr, l_out_grad_hist, 'b--', label="l-grad") # cls_out_grad
+
+ax.set_ylim([0.0, 1.0])
+
+plt.title("acc, grad_sqr")
+legend = ax.legend(loc='upper left', shadow=True, bbox_to_anchor=(1.1,1))
+legend = ax2.legend(loc='upper left', shadow=True, bbox_to_anchor=(1.1,0.7))
+
+frame = legend.get_frame()
+frame.set_facecolor('0.99')
+
+# Set the fontsize
+for label in legend.get_texts():
+    label.set_fontsize('large')
+
+for label in legend.get_lines():
+    label.set_linewidth(1.5)  # the legend line width
+plt.show()
+
+
+
+
+#%%
+
+host = host_subplot(111, axes_class=AA.Axes)
+plt.subplots_adjust(right=0.75)
+
+par1 = host.twinx()
+par2 = host.twinx()
+
+offset = 60
+new_fixed_axis = par2.get_grid_helper().new_fixed_axis
+par2.axis["right"] = new_fixed_axis(loc="right",
+                                    axes=par2,
+                                    offset=(offset, 0))
+
+par2.axis["right"].toggle(all=True)
+
+host.set_xlim(0,len(epr))
+
+host.set_xlabel("epoch")
+host.set_ylabel("acc")
+par1.set_ylabel("out_grad")
+par2.set_ylabel("l/d grad")
+
+host.plot(epr, d_acc_hist, 'r-', label="d-acc") # d acc
+host.plot(epr, l_acc_hist, 'b-', label="l-acc") # l acc
+
+par1.set_yscale("log")
+par1.plot(epr, d_out_grad_hist, 'r--', label="d-grad") # domain_out_grad
+par1.plot(epr, l_out_grad_hist, 'b--', label="l-grad") # cls_out_grad
+
+par2.set_yscale("log")
+par2.plot(epr, np.divide(l_out_grad_hist, d_out_grad_hist), 'g--', label="l/d grad")
+
+
+fig = plt.figure() 
+default_size = fig.get_size_inches() 
+plt.rcParams["figure.figsize"] = (7,3)
+
+#par1.set_ylim(0, 4)
+#par2.set_ylim(1, 65)
+
+host.legend(loc='upper left', shadow=True, bbox_to_anchor=(0.0,-0.1))
+
+plt.draw()
+plt.show()
+
+
+
+#plt.plot(list(range(len(domain_loss_history))), domain_loss_history,"r-", list(range(len(cls_loss_history))), cls_loss_history,"b-")
+#%%
+domain_loss_history =[m[1] for m in metric_src_epoch_list]
+cls_loss_history =[m[2] for m in metric_src_epoch_list]
+
+plt.plot(list(range(len(domain_loss_history))), domain_loss_history,"r-", list(range(len(cls_loss_history))), cls_loss_history,"b-")
+#plt.savefig(name)
+plt.close()
+import json
+with open('dan_gen.txt', 'w') as outfile:
+    json.dump(metric_src_epoch_list, outfile)
+
+#%%
 print('Evaluating target samples on DANN model')
-size = batch_size / 2
-nb_testbatches = XT_test.shape[0] / size
+size = batch_size // 2
+nb_testbatches = XT_test.shape[0] // size
 acc = evaluate_dann(nb_testbatches, size)
 print('Accuracy:', acc)
 print('Visualizing output of domain invariant features')

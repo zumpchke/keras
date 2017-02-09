@@ -1,9 +1,10 @@
 import theano
 from theano import tensor as T
-from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
-from theano.tensor.signal import pool
-from theano.tensor.nnet import conv3d2d
 from theano.printing import Print
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from theano.tensor.nnet import conv3d2d
+from theano.tensor.signal import pool
+
 try:
     import theano.sparse as th_sparse_module
 except ImportError:
@@ -963,15 +964,9 @@ def rnn(step_function, inputs, initial_states,
     return last_output, outputs, states
 
 
-def switch(condition, then_expression, else_expression, lazy=False):
+def switch(condition, then_expression, else_expression):
     '''condition: scalar tensor.
-
-    # Arguments:
-        lazy: Use ifelse op which evaluates arguments in a lazy manner.
     '''
-    if lazy:
-        return theano.ifelse.ifelse(condition, then_expression, else_expression)
-
     return T.switch(condition, then_expression, else_expression)
 
 
@@ -1696,11 +1691,12 @@ def ctc_batch_cost(y_true, y_pred, input_length, label_length):
 
 class ReverseGradient(theano.Op):
     '''Flips the sign of incoming gradient during training.'''
+    view_map = {0: [0]}
     __props__ = ('hp_lambda', )
 
-    def __init__(self):
+    def __init__(self, hp_lambda):
         super(ReverseGradient, self).__init__()
-        self.hp_lambda = None
+        self.hp_lambda = hp_lambda
 
     def make_node(self, x):
         assert hasattr(self, '_props'), 'Your version of theano is too old to support __props__.'
@@ -1717,8 +1713,3 @@ class ReverseGradient(theano.Op):
 
     def infer_shape(self, node, i0_shapes):
         return i0_shapes
-
-_reverse_gradient = ReverseGradient()
-def reverse_gradient(x, hp_lambda):
-    _reverse_gradient.hp_lambda = hp_lambda
-    return _reverse_gradient(x)

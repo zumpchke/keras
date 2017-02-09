@@ -4,6 +4,7 @@
 temp/*
 dist/*
 build/*
+run/*
 keras/datasets/data/*
 keras/datasets/temp/*
 docs/site/*

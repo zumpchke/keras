@@ -1,7 +1,9 @@
 import gzip
-from ..utils.data_utils import get_file
-from six.moves import cPickle
+import pickle
 import sys
+
+from ..utils.data_utils import get_file
+
 
 def load_data(path='keras_mnistm.pkl.gz'):
     path = get_file(path, origin='https://github.com/VanushVaswani/keras_mnistm/releases/download/1.0/keras_mnistm.pkl.gz')
@@ -12,9 +14,9 @@ def load_data(path='keras_mnistm.pkl.gz'):
         f = open(path, 'rb')
 
     if sys.version_info < (3,):
-        data = cPickle.load(f)
+        data = pickle.load(f)
     else:
-        data = cPickle.load(f, encoding='bytes')
+        data = pickle.load(f, encoding='bytes')
 
     f.close()
     return data
